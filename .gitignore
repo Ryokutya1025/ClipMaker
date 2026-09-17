@@ -176,6 +176,7 @@ tempCodeRunnerFile.py
 # ==============================
 
 *.log
+*.docx
 
 # Local databases
 *.sqlite
