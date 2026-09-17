@@ -186,4 +186,6 @@ tempCodeRunnerFile.py
 # Backups
 *.bak
 *.old
+
+old/
 """
