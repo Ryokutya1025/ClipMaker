@@ -144,6 +144,10 @@ def get_info(path):
                     "live_id": live_id,
                     # 配信タイトル
                     "title": live_info["title"],
+                    # 配信開始時刻
+                    "start_timestamp": live_info["start_timestamp"],
+                    # 配信時間
+                    "duration": live_info["duration"],
                     # コメント投稿者ID
                     "user_id": data.get("userId", ""),
                     # コメント投稿者名
