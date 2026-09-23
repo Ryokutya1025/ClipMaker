@@ -1,19 +1,12 @@
 from database.connection import get_connection
 
 # =========================================================
-# 配信登録
+# streams登録
 # =========================================================
 
 
 def register_stream(conn, stream_info):
-    """
-    配信情報をstreamsテーブルへ登録する
 
-    同じlive_idがすでに存在する場合は
-    配信情報を更新する
-    """
-
-    # 配信情報を登録
     conn.execute(
         """
         INSERT INTO streams (
@@ -41,45 +34,32 @@ def register_stream(conn, stream_info):
         ),
     )
 
-    # 登録した配信のDB上のIDを取得
-    cursor = conn.execute(
+    row = conn.execute(
         """
         SELECT id
         FROM streams
         WHERE live_id = ?
         """,
         (stream_info["live_id"],),
-    )
-
-    row = cursor.fetchone()
+    ).fetchone()
 
     return row["id"]
 
 
 # =========================================================
-# コメント登録
+# comments登録
 # =========================================================
 
 
 def register_comments(conn, stream_ids, mark_list):
-    """
-    キーワードに該当したコメントを
-    commentsテーブルへ登録する
-    """
 
-    # 登録データを保存するリスト
     rows = []
 
-    # Markを1件ずつ処理
     for mark in mark_list:
 
-        # live_idからDB上のstream_idを取得
-        stream_id = stream_ids[mark["live_id"]]
-
-        # 登録データを作成
         rows.append(
             (
-                stream_id,
+                stream_ids[mark["live_id"]],
                 mark["user_id"],
                 mark["name"],
                 mark["mark_time"],
@@ -87,14 +67,12 @@ def register_comments(conn, stream_ids, mark_list):
             )
         )
 
-    # データがなければ終了
     if not rows:
         return
 
-    # コメントをまとめて登録
     conn.executemany(
         """
-        INSERT OR IGNORE INTO comments (
+        INSERT INTO comments (
             stream_id,
             user_id,
             name,
@@ -108,29 +86,19 @@ def register_comments(conn, stream_ids, mark_list):
 
 
 # =========================================================
-# Mark / Unique登録
+# mark_unique登録
 # =========================================================
 
 
 def register_mark_unique(conn, stream_ids, clip_list):
-    """
-    結合済みクリップ候補の
-    Mark数・Unique数をmark_uniqueテーブルへ登録する
-    """
 
-    # 登録データを保存するリスト
     rows = []
 
-    # クリップ候補を1件ずつ処理
     for clip in clip_list:
 
-        # live_idからDB上のstream_idを取得
-        stream_id = stream_ids[clip["live_id"]]
-
-        # 登録データを作成
         rows.append(
             (
-                stream_id,
+                stream_ids[clip["live_id"]],
                 clip["start_time"],
                 clip["end_time"],
                 clip["mark_count"],
@@ -138,11 +106,9 @@ def register_mark_unique(conn, stream_ids, clip_list):
             )
         )
 
-    # データがなければ終了
     if not rows:
         return
 
-    # Mark / Unique情報をまとめて登録
     conn.executemany(
         """
         INSERT INTO mark_unique (
@@ -159,79 +125,42 @@ def register_mark_unique(conn, stream_ids, clip_list):
 
 
 # =========================================================
-# 解析結果登録
+# 解析結果保存
 # =========================================================
 
 
 def save_analysis(comment_info_list, mark_list, clip_list):
-    """
-    解析したデータをデータベースへ保存する
 
-    streams
-        配信情報
-
-    comments
-        キーワードに該当したコメント
-
-    mark_unique
-        結合済みクリップ候補と
-        Mark数・Unique数
-    """
-
-    # データがなければ終了
     if not comment_info_list:
         return
 
-    # live_id → stream_id
-    stream_ids = {}
-
-    # -----------------------------------------
-    # 配信情報整理
-    # -----------------------------------------
-
-    # 同じ配信情報がコメントごとに含まれているため
-    # live_id単位にまとめる
     streams = {}
 
-    for comment_info in comment_info_list:
+    # 配信ごとに情報整理
+    for comment in comment_info_list:
 
-        live_id = comment_info["live_id"]
+        live_id = comment["live_id"]
 
         streams[live_id] = {
             "live_id": live_id,
-            "title": comment_info["title"],
-            "url": comment_info["url"],
-            "start_timestamp": comment_info["start_timestamp"],
-            "duration": comment_info["duration"],
+            "title": comment["title"],
+            "url": comment["url"],
+            "start_timestamp": comment["start_timestamp"],
+            "duration": comment["duration"],
         }
 
-    # -----------------------------------------
-    # DB登録
-    # -----------------------------------------
+    stream_ids = {}
 
     with get_connection() as conn:
 
-        # -----------------------------------------
         # streams登録
-        # -----------------------------------------
+        for live_id, stream in streams.items():
 
-        for live_id, stream_info in streams.items():
+            stream_ids[live_id] = register_stream(conn, stream)
 
-            # 配信情報を登録
-            stream_id = register_stream(conn, stream_info)
-
-            # live_idとDB上のIDを紐付け
-            stream_ids[live_id] = stream_id
-
-        # -----------------------------------------
-        # 既存解析結果削除
-        # -----------------------------------------
-
-        # 同じ配信を再解析した場合に
-        # 古い解析結果が残らないよう削除する
+        # 古い解析結果削除
         for stream_id in stream_ids.values():
 
-            # コメント解析結果を削除
             conn.execute(
                 """
                 DELETE FROM comments
@@ -240,7 +169,6 @@ def save_analysis(comment_info_list, mark_list, clip_list):
                 (stream_id,),
             )
 
-            # Mark / Unique解析結果を削除
             conn.execute(
                 """
                 DELETE FROM mark_unique
@@ -249,14 +177,8 @@ def save_analysis(comment_info_list, mark_list, clip_list):
                 (stream_id,),
             )
 
-        # -----------------------------------------
         # comments登録
-        # -----------------------------------------
-
         register_comments(conn, stream_ids, mark_list)
 
-        # -----------------------------------------
         # mark_unique登録
-        # -----------------------------------------
-
         register_mark_unique(conn, stream_ids, clip_list)

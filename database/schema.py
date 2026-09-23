@@ -6,9 +6,6 @@ from database.connection import get_connection
 
 
 def create_tables():
-    """
-    ClipMakerで使用するテーブルを作成する
-    """
 
     with get_connection() as conn:
 
@@ -18,6 +15,7 @@ def create_tables():
 
         conn.execute("""
             CREATE TABLE IF NOT EXISTS streams (
+
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
 
                 live_id TEXT NOT NULL UNIQUE,
@@ -38,6 +36,7 @@ def create_tables():
 
         conn.execute("""
             CREATE TABLE IF NOT EXISTS comments (
+
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
 
                 stream_id INTEGER NOT NULL,
@@ -52,14 +51,7 @@ def create_tables():
 
                 FOREIGN KEY (stream_id)
                     REFERENCES streams(id)
-                    ON DELETE CASCADE,
-
-                UNIQUE (
-                    stream_id,
-                    user_id,
-                    mark_time,
-                    comment
-                )
+                    ON DELETE CASCADE
             )
             """)
 
@@ -69,6 +61,7 @@ def create_tables():
 
         conn.execute("""
             CREATE TABLE IF NOT EXISTS mark_unique (
+
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
 
                 stream_id INTEGER NOT NULL,
@@ -88,26 +81,17 @@ def create_tables():
             """)
 
         # -----------------------------------------
-        # インデックス
+        # Index
         # -----------------------------------------
 
-        # コメントを配信単位で検索しやすくする
         conn.execute("""
             CREATE INDEX IF NOT EXISTS
-            idx_comments_stream_id
+            idx_comments_stream
             ON comments(stream_id)
             """)
 
-        # コメント時刻検索用
         conn.execute("""
             CREATE INDEX IF NOT EXISTS
-            idx_comments_mark_time
-            ON comments(mark_time)
-            """)
-
-        # クリップ候補を配信単位で検索しやすくする
-        conn.execute("""
-            CREATE INDEX IF NOT EXISTS
-            idx_mark_unique_stream_id
+            idx_mark_unique_stream
             ON mark_unique(stream_id)
             """)

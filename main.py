@@ -4,10 +4,19 @@ from log_parser import get_info
 
 from mark import create_marks, merge_marks
 
-from time_utils import seconds_to_time
-
 from database.schema import create_tables
 from database.repository import save_analysis
+
+from visualization.heatmap import plot_mark_unique_heatmap
+
+from debug import print_marks, print_clips
+
+# =========================================================
+# 設定
+# =========================================================
+
+DEBUG = True
+
 
 # =========================================================
 # main
@@ -16,67 +25,32 @@ from database.repository import save_analysis
 
 def main():
 
-    # -----------------------------------------
-    # データベース初期化
-    # -----------------------------------------
-
-    # 必要なテーブルを作成
+    # DB初期化
     create_tables()
 
-    # -----------------------------------------
-    # コメント情報取得
-    # -----------------------------------------
+    # ログ解析
+    comments = get_info(LOG_PATH)
 
-    # ログファイルからコメント情報を抽出
-    comment_info_list = get_info(LOG_PATH)
+    if not comments:
+        print("コメントデータがありません。")
+        return
 
-    # -----------------------------------------
     # Mark生成
-    # -----------------------------------------
+    marks = create_marks(comments)
 
-    # コメント情報からMark一覧を生成
-    mark_list = create_marks(comment_info_list)
-
-    # -----------------------------------------
     # Mark結合
-    # -----------------------------------------
+    clips = merge_marks(marks)
 
-    # 重なっているMarkを連鎖的に結合
-    clip_list = merge_marks(mark_list)
+    # テスト表示
+    if DEBUG:
+        print_marks(marks)
+        print_clips(clips)
 
-    # -----------------------------------------
-    # データベース登録
-    # -----------------------------------------
+    # DB保存
+    save_analysis(comments, marks, clips)
 
-    # 配信情報
-    # キーワードコメント
-    # Mark / Unique集計結果
-    # をデータベースへ保存
-    save_analysis(comment_info_list, mark_list, clip_list)
-
-    # -----------------------------------------
-    # 確認表示
-    # -----------------------------------------
-
-    for index, clip in enumerate(clip_list, start=1):
-
-        # 開始時刻を表示用へ変換
-        start_time = seconds_to_time(clip["start_time"])
-
-        # 終了時刻を表示用へ変換
-        end_time = seconds_to_time(clip["end_time"])
-
-        print(
-            f"===== Clip {index} =====\n"
-            f"配信ID: {clip['live_id']}\n"
-            f"開始時刻: {start_time}\n"
-            f"終了時刻: {end_time}\n"
-            f"Mark数: {clip['mark_count']}\n"
-            f"Unique数: {clip['unique_count']}\n"
-        )
-
-    # 後続処理で使用できるよう返す
-    return clip_list
+    # グラフ表示
+    # plot_mark_unique_heatmap(comments[0]["live_id"])
 
 
 if __name__ == "__main__":

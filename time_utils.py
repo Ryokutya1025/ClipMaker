@@ -1,34 +1,33 @@
 from datetime import datetime
 
 # =========================================================
-# コメント時刻を配信開始からの経過秒数へ変換
+# コメント時刻 → 配信開始からの秒数
 # =========================================================
 
 
 def convert_comment_time(timestamp, live_info):
     """
-    コメントのISO形式時刻を
+    コメント投稿時刻を
     配信開始からの経過秒数へ変換する
     """
 
-    # ISO形式のコメント時刻をdatetime型へ変換
+    # ISO形式 → datetime
     comment_datetime = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
 
-    # datetime型をUnix timestampへ変換
+    # datetime → Unix timestamp
     comment_timestamp = comment_datetime.timestamp()
 
-    # 配信開始からコメント投稿までの経過秒数を計算
+    # 配信開始からの経過秒数
     total_seconds = int(comment_timestamp - live_info["start_timestamp"])
 
-    # 配信開始前のコメントを除外
+    # 配信開始前
     if total_seconds < 0:
         return None
 
-    # 配信終了後のコメントを除外
+    # 配信終了後
     if total_seconds > live_info["duration"]:
         return None
 
-    # 配信開始からの経過秒数を返す
     return total_seconds
 
 
@@ -38,18 +37,13 @@ def convert_comment_time(timestamp, live_info):
 
 
 def seconds_to_time(total_seconds):
-    """
-    秒数を表示用のHH:MM:SS形式へ変換する
-    """
 
-    # 時間を計算
+    total_seconds = max(0, int(total_seconds))
+
     hours = total_seconds // 3600
 
-    # 分を計算
     minutes = (total_seconds % 3600) // 60
 
-    # 秒を計算
     seconds = total_seconds % 60
 
-    # HH:MM:SS形式の文字列を返す
     return f"{hours:02}:" f"{minutes:02}:" f"{seconds:02}"
