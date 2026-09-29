@@ -7,6 +7,14 @@
 
 ---
 
+![Version](https://img.shields.io/badge/version-0.1.0--beta-orange)
+![Python](https://img.shields.io/badge/Python-3.x-blue?logo=python&logoColor=white)
+![Flask](https://img.shields.io/badge/Flask-Framework-black?logo=flask&logoColor=white)
+![SQLite](https://img.shields.io/badge/SQLite-Database-003B57?logo=sqlite&logoColor=white)
+![yt-dlp](https://img.shields.io/badge/yt--dlp-Supported-red?logo=youtube&logoColor=white)
+![License](https://img.shields.io/github/license/Ryokutya1025/ClipMaker)
+![Last Commit](https://img.shields.io/github/last-commit/Ryokutya1025/ClipMaker)
+
 ## 概要
 
 ClipMaker は配信コメントログを解析し、
