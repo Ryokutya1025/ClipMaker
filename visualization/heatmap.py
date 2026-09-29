@@ -1,35 +1,129 @@
 import math
 
-import numpy as np
+import matplotlib.font_manager as font_manager
 import matplotlib.pyplot as plt
+import numpy as np
 
-from matplotlib.patches import FancyBboxPatch, Patch
-
+from matplotlib.patches import Patch, Rectangle
+from matplotlib.ticker import FixedLocator, FuncFormatter
 from matplotlib.widgets import Slider
 
-from matplotlib.ticker import FuncFormatter, FixedLocator
-
 from config import (
-    HEATMAP_DEFAULT_BIN,
-    HEATMAP_MIN_BIN,
-    HEATMAP_MAX_BIN,
     HEATMAP_BIN_STEP,
+    HEATMAP_DEFAULT_BIN,
     HEATMAP_GRID_ROWS,
+    HEATMAP_MAX_BIN,
+    HEATMAP_MIN_BIN,
+    HEATMAP_RENDER_HEIGHT,
+    HEATMAP_RENDER_WIDTH,
+    HEATMAP_SCROLL_STEP,
     HEATMAP_VISIBLE_COLUMNS,
-    HEATMAP_CELL_GAP,
-    HEATMAP_ROUND_RATIO,
 )
-
 from database.connection import get_connection
-
 from time_utils import seconds_to_time
-
 from visualization.colors import (
     BACKGROUND_COLOR,
     EMPTY_CELL_COLOR,
-    create_data_color,
-    ryb_to_rgb,
+    MARK_AXIS_COLOR,
+    MARK_BASE_COLOR,
+    TEXT_PRIMARY_COLOR,
+    TEXT_SECONDARY_COLOR,
+    UNIQUE_AXIS_COLOR,
+    UNIQUE_BASE_COLOR,
+    mark_color,
+    unique_color,
 )
+
+# =========================================================
+# Matplotlib日本語フォント設定
+# =========================================================
+
+
+def configure_japanese_font():
+    """
+    macOS / Windows / Linuxで見つかりやすい日本語フォントを順に探し、
+    Matplotlibへ設定する。
+
+    macOSでは通常 Hiragino Sans が選ばれる。
+    """
+
+    candidates = [
+        "Hiragino Sans",
+        "Hiragino Kaku Gothic ProN",
+        "Yu Gothic",
+        "YuGothic",
+        "Noto Sans CJK JP",
+        "Noto Sans JP",
+        "IPAexGothic",
+        "IPAGothic",
+        "TakaoGothic",
+    ]
+
+    available_fonts = {font.name for font in font_manager.fontManager.ttflist}
+
+    selected_font = None
+
+    for font_name in candidates:
+        if font_name in available_fonts:
+            selected_font = font_name
+            break
+
+    if selected_font is not None:
+        plt.rcParams["font.family"] = selected_font
+
+    else:
+        plt.rcParams["font.family"] = "sans-serif"
+
+        plt.rcParams["font.sans-serif"] = candidates + [
+            "DejaVu Sans",
+        ]
+
+    # マイナス記号の文字化け防止
+    plt.rcParams["axes.unicode_minus"] = False
+
+    return selected_font
+
+
+# =========================================================
+# Y軸最大値計算
+# =========================================================
+
+
+def get_axis_max(value):
+    """
+    データの最大値より少し大きいY軸最大値を返す。
+
+    最大値をそのままY軸上限にすると、
+    一番高いグラフが上端に張り付いて見えるため、
+    約20%の余白を持たせる。
+
+    さらにY軸を4分割したとき、
+    目盛りが整数になるように調整する。
+
+    例
+    ----------
+    1  -> 4
+    5  -> 8
+    9  -> 12
+    15 -> 20
+    """
+
+    if value <= 0:
+        return 1
+
+    # 最大値より20%上を目標にする
+    target = value * 1.2
+
+    # Y軸を4分割した際に整数になるようにする
+    tick_step = max(
+        1,
+        math.ceil(target / 4),
+    )
+
+    axis_max = tick_step * 4
+
+    return axis_max
+
 
 # =========================================================
 # 配信情報取得
@@ -38,12 +132,10 @@ from visualization.colors import (
 
 def get_stream(live_id):
     """
-    streamsテーブルから
-    指定された配信情報を取得する
+    streamsテーブルから指定された配信情報を取得する。
     """
 
     with get_connection() as conn:
-
         row = conn.execute(
             """
             SELECT
@@ -57,7 +149,6 @@ def get_stream(live_id):
             (live_id,),
         ).fetchone()
 
-    # 配信が存在しない場合
     if row is None:
         return None
 
@@ -71,12 +162,10 @@ def get_stream(live_id):
 
 def get_mark_unique(stream_id):
     """
-    mark_uniqueテーブルから
-    指定された配信の解析結果を取得する
+    mark_uniqueテーブルから指定された配信の解析結果を取得する。
     """
 
     with get_connection() as conn:
-
         rows = conn.execute(
             """
             SELECT
@@ -100,51 +189,72 @@ def get_mark_unique(stream_id):
 # =========================================================
 
 
-def create_bins(duration, mark_unique_list, bin_seconds):
+def create_bins(
+    duration,
+    mark_unique_list,
+    bin_seconds,
+):
     """
-    mark_uniqueの範囲を
-    指定秒数ごとの時間ビンへ展開する
+    mark_uniqueの範囲を、
+    指定秒数ごとの時間ビンへ展開する。
+
+    戻り値
+    ----------
+    mark_values:
+        各時間ビンのMark数
+
+    unique_values:
+        各時間ビンのUnique数
+
+    candidate_ids:
+        各時間ビンに含まれるmark_unique.idの一覧
     """
 
-    # 必要なビン数
-    bin_count = math.ceil(duration / bin_seconds)
+    bin_count = max(
+        1,
+        math.ceil(duration / bin_seconds),
+    )
 
-    # Mark数
-    mark_values = np.zeros(bin_count, dtype=int)
+    mark_values = np.zeros(
+        bin_count,
+        dtype=int,
+    )
 
-    # Unique数
-    unique_values = np.zeros(bin_count, dtype=int)
+    unique_values = np.zeros(
+        bin_count,
+        dtype=int,
+    )
 
-    # 各時間帯に含まれる候補ID
     candidate_ids = [[] for _ in range(bin_count)]
-
-    # -----------------------------------------
-    # mark_uniqueを展開
-    # -----------------------------------------
 
     for item in mark_unique_list:
 
-        start_time = max(0, int(item["start_time"]))
+        start_time = max(
+            0,
+            int(item["start_time"]),
+        )
 
-        end_time = min(duration, int(item["end_time"]))
+        end_time = min(
+            duration,
+            int(item["end_time"]),
+        )
 
-        # 不正な範囲
         if end_time <= start_time:
             continue
 
-        # 開始ビン
         start_bin = start_time // bin_seconds
 
-        # 終了ビン
         end_bin = (end_time - 1) // bin_seconds
 
-        end_bin = min(bin_count - 1, end_bin)
+        end_bin = min(
+            bin_count - 1,
+            end_bin,
+        )
 
-        # -----------------------------------------
-        # 該当ビンへ加算
-        # -----------------------------------------
-
-        for bin_index in range(start_bin, end_bin + 1):
+        for bin_index in range(
+            start_bin,
+            end_bin + 1,
+        ):
 
             mark_values[bin_index] += int(item["mark_count"])
 
@@ -152,7 +262,168 @@ def create_bins(duration, mark_unique_list, bin_seconds):
 
             candidate_ids[bin_index].append(item["id"])
 
-    return (mark_values, unique_values, candidate_ids)
+    return (
+        mark_values,
+        unique_values,
+        candidate_ids,
+    )
+
+
+# =========================================================
+# 左Mark / 右Unique の画像生成
+# =========================================================
+
+
+def create_split_heatmap_image(
+    mark_values,
+    unique_values,
+    max_mark,
+    max_unique,
+):
+    """
+    1時間ビンを左右に分割した
+    ヒートマップ画像を生成する。
+
+    左半分:
+        Mark = 緑
+
+    右半分:
+        Unique = 黄
+
+    FancyBboxPatchを大量に生成せず、
+    RGBA画像を1枚だけ描画することで、
+    スクロール時の再描画負荷を減らす。
+    """
+
+    bin_count = len(mark_values)
+
+    render_width = max(
+        6,
+        int(HEATMAP_RENDER_WIDTH),
+    )
+
+    render_height = max(
+        3,
+        int(HEATMAP_RENDER_HEIGHT),
+    )
+
+    image_width = bin_count * render_width
+
+    image_height = HEATMAP_GRID_ROWS * render_height
+
+    image = np.empty(
+        (
+            image_height,
+            image_width,
+            4,
+        ),
+        dtype=float,
+    )
+
+    image[
+        :,
+        :,
+        :3,
+    ] = EMPTY_CELL_COLOR
+
+    image[
+        :,
+        :,
+        3,
+    ] = 1.0
+
+    # 各セルの上下に隙間
+    y_inner_start = 1
+
+    y_inner_end = max(
+        y_inner_start + 1,
+        render_height - 1,
+    )
+
+    # 1区間内の左右レイアウト
+    #
+    # [余白][Mark][隙間][Unique][余白]
+
+    outer_gap = 1
+
+    center_gap = 1
+
+    usable_width = render_width - outer_gap * 2 - center_gap
+
+    half_width = max(
+        1,
+        usable_width // 2,
+    )
+
+    mark_x_start_offset = outer_gap
+
+    mark_x_end_offset = mark_x_start_offset + half_width
+
+    unique_x_end_offset = render_width - outer_gap
+
+    unique_x_start_offset = unique_x_end_offset - half_width
+
+    for bin_index in range(bin_count):
+
+        mark_count = int(mark_values[bin_index])
+
+        unique_count = int(unique_values[bin_index])
+
+        if max_mark:
+            mark_ratio = mark_count / max_mark
+
+        else:
+            mark_ratio = 0.0
+
+        if max_unique:
+            unique_ratio = unique_count / max_unique
+
+        else:
+            unique_ratio = 0.0
+
+        mark_height = math.ceil(mark_ratio * HEATMAP_GRID_ROWS)
+
+        unique_height = math.ceil(unique_ratio * HEATMAP_GRID_ROWS)
+
+        mark_rgb = mark_color(mark_ratio)
+
+        unique_rgb = unique_color(unique_ratio)
+
+        base_x = bin_index * render_width
+
+        mark_x0 = base_x + mark_x_start_offset
+
+        mark_x1 = base_x + mark_x_end_offset
+
+        unique_x0 = base_x + unique_x_start_offset
+
+        unique_x1 = base_x + unique_x_end_offset
+
+        for row in range(HEATMAP_GRID_ROWS):
+
+            base_y = row * render_height
+
+            y0 = base_y + y_inner_start
+
+            y1 = base_y + y_inner_end
+
+            if row < mark_height:
+
+                image[
+                    y0:y1,
+                    mark_x0:mark_x1,
+                    :3,
+                ] = mark_rgb
+
+            if row < unique_height:
+
+                image[
+                    y0:y1,
+                    unique_x0:unique_x1,
+                    :3,
+                ] = unique_rgb
+
+    return image
 
 
 # =========================================================
@@ -162,7 +433,16 @@ def create_bins(duration, mark_unique_list, bin_seconds):
 
 class MarkUniqueHeatmap:
 
-    def __init__(self, live_id):
+    def __init__(
+        self,
+        live_id,
+    ):
+
+        # -----------------------------------------
+        # 日本語フォント
+        # -----------------------------------------
+
+        self.selected_font = configure_japanese_font()
 
         # -----------------------------------------
         # 配信情報
@@ -171,7 +451,8 @@ class MarkUniqueHeatmap:
         self.stream = get_stream(live_id)
 
         if self.stream is None:
-            raise ValueError("指定された配信が" "streamsテーブルに存在しません。")
+
+            raise ValueError("指定された配信が" "streamsテーブルに" "存在しません。")
 
         # -----------------------------------------
         # Mark / Unique情報
@@ -180,98 +461,174 @@ class MarkUniqueHeatmap:
         self.mark_unique_list = get_mark_unique(self.stream["id"])
 
         if not self.mark_unique_list:
+
             raise ValueError("mark_uniqueテーブルに" "対象データがありません。")
 
         # -----------------------------------------
         # 状態
         # -----------------------------------------
 
-        # 1マスあたりの秒数
         self.bin_seconds = HEATMAP_DEFAULT_BIN
 
-        self.mark_values = None
-        self.unique_values = None
+        self.mark_values = np.array(
+            [],
+            dtype=int,
+        )
 
-        self.candidate_ids = None
+        self.unique_values = np.array(
+            [],
+            dtype=int,
+        )
 
-        # 最大値
+        self.candidate_ids = []
+
         self.max_mark = 1
+
         self.max_unique = 1
 
-        # Hover中のビン
         self.hover_bin = None
+
+        self._updating_scroll_slider = False
 
         # -----------------------------------------
         # Figure
         # -----------------------------------------
 
-        self.fig = plt.figure(figsize=(16, 8))
+        self.fig = plt.figure(
+            figsize=(
+                16,
+                8,
+            )
+        )
 
-        # 背景
         self.fig.patch.set_facecolor(BACKGROUND_COLOR)
 
         # -----------------------------------------
         # グラフ本体
         # -----------------------------------------
 
-        self.ax = self.fig.add_axes([0.07, 0.22, 0.86, 0.66])
+        self.ax = self.fig.add_axes(
+            [
+                0.075,
+                0.22,
+                0.85,
+                0.66,
+            ]
+        )
 
         self.ax.set_facecolor(BACKGROUND_COLOR)
 
-        # Secondary Axis用
         self.ax_right = None
+
+        self.image_artist = None
+
+        # -----------------------------------------
+        # Hover表示
+        # -----------------------------------------
+
+        self.hover_patch = Rectangle(
+            (
+                0,
+                0,
+            ),
+            1,
+            HEATMAP_GRID_ROWS,
+            facecolor=(
+                1.0,
+                1.0,
+                1.0,
+                0.035,
+            ),
+            edgecolor="#f0f6fc",
+            linewidth=0.8,
+            zorder=8,
+            visible=False,
+        )
+
+        self.ax.add_patch(self.hover_patch)
+
+        self.annotation = self.ax.annotate(
+            "",
+            xy=(
+                0,
+                0,
+            ),
+            xytext=(
+                14,
+                14,
+            ),
+            textcoords=("offset points"),
+            bbox={
+                "boxstyle": "round,pad=0.6",
+                "fc": "#161b22",
+                "ec": "#30363d",
+            },
+            color=(TEXT_PRIMARY_COLOR),
+            fontsize=9,
+            zorder=20,
+        )
+
+        self.annotation.set_visible(False)
 
         # -----------------------------------------
         # Bin Slider
         # -----------------------------------------
 
-        bin_ax = self.fig.add_axes([0.16, 0.105, 0.56, 0.030])
+        bin_ax = self.fig.add_axes(
+            [
+                0.16,
+                0.105,
+                0.56,
+                0.030,
+            ]
+        )
 
         bin_ax.set_facecolor("#161b22")
 
         self.bin_slider = Slider(
             ax=bin_ax,
-            label="Bin",
-            valmin=HEATMAP_MIN_BIN,
-            valmax=HEATMAP_MAX_BIN,
-            valinit=HEATMAP_DEFAULT_BIN,
-            valstep=HEATMAP_BIN_STEP,
-            valfmt="%0.0f sec",
+            label="区間",
+            valmin=(HEATMAP_MIN_BIN),
+            valmax=(HEATMAP_MAX_BIN),
+            valinit=(HEATMAP_DEFAULT_BIN),
+            valstep=(HEATMAP_BIN_STEP),
+            valfmt="%0.0f 秒",
         )
 
         # -----------------------------------------
         # Scroll Slider
         # -----------------------------------------
 
-        scroll_ax = self.fig.add_axes([0.16, 0.050, 0.56, 0.030])
+        scroll_ax = self.fig.add_axes(
+            [
+                0.16,
+                0.050,
+                0.56,
+                0.030,
+            ]
+        )
 
         scroll_ax.set_facecolor("#161b22")
 
         self.scroll_slider = Slider(
             ax=scroll_ax,
-            label="Time",
-            valmin=0,
-            valmax=100,
-            valinit=0,
-            valstep=1,
-            valfmt="%0.0f%%",
+            label="時間位置",
+            valmin=0.0,
+            valmax=100.0,
+            valinit=0.0,
+            # 連続値で動かす
+            valstep=None,
+            valfmt="%0.1f%%",
         )
 
-        # -----------------------------------------
-        # Slider文字色
-        # -----------------------------------------
+        for slider in (
+            self.bin_slider,
+            self.scroll_slider,
+        ):
 
-        for slider in (self.bin_slider, self.scroll_slider):
-
-            slider.label.set_color("#8b949e")
+            slider.label.set_color(TEXT_SECONDARY_COLOR)
 
             slider.valtext.set_color("#c9d1d9")
-
-        # -----------------------------------------
-        # Hover
-        # -----------------------------------------
-
-        self.annotation = None
 
         # -----------------------------------------
         # Event
@@ -281,21 +638,27 @@ class MarkUniqueHeatmap:
 
         self.scroll_slider.on_changed(self.on_scroll_changed)
 
-        self.fig.canvas.mpl_connect("motion_notify_event", self.on_mouse_move)
+        self.fig.canvas.mpl_connect(
+            "motion_notify_event",
+            self.on_mouse_move,
+        )
 
-        self.fig.canvas.mpl_connect("scroll_event", self.on_mouse_scroll)
-
-        # -----------------------------------------
-        # 初期データ生成
-        # -----------------------------------------
-
-        self.rebuild_data()
+        self.fig.canvas.mpl_connect(
+            "scroll_event",
+            self.on_mouse_scroll,
+        )
 
         # -----------------------------------------
         # 初期描画
         # -----------------------------------------
 
-        self.draw()
+        self.rebuild_data()
+
+        self.setup_axes()
+
+        self.rebuild_image()
+
+        self.update_view()
 
     # =====================================================
     # データ再生成
@@ -303,145 +666,53 @@ class MarkUniqueHeatmap:
 
     def rebuild_data(self):
         """
-        現在のbin_secondsを使用して
-        ヒートマップデータを再生成する
+        現在のbin_secondsを使って
+        ヒートマップデータを再生成する。
         """
 
-        self.mark_values, self.unique_values, self.candidate_ids = create_bins(
-            duration=self.stream["duration"],
-            mark_unique_list=self.mark_unique_list,
-            bin_seconds=self.bin_seconds,
+        (
+            self.mark_values,
+            self.unique_values,
+            self.candidate_ids,
+        ) = create_bins(
+            duration=(self.stream["duration"]),
+            mark_unique_list=(self.mark_unique_list),
+            bin_seconds=(self.bin_seconds),
         )
 
-        # Mark最大値
-        self.max_mark = max(1, int(self.mark_values.max()))
-
-        # Unique最大値
-        self.max_unique = max(1, int(self.unique_values.max()))
-
-    # =====================================================
-    # 表示開始位置
-    # =====================================================
-
-    def get_visible_start(self):
-        """
-        Scroll Sliderから
-        表示開始ビンを計算する
-        """
-
-        total_bins = len(self.mark_values)
-
-        max_start = max(0, total_bins - HEATMAP_VISIBLE_COLUMNS)
-
-        ratio = self.scroll_slider.val / 100
-
-        return int(round(max_start * ratio))
-
-    # =====================================================
-    # セル描画
-    # =====================================================
-
-    def draw_cell(self, x, y, color):
-        """
-        GitHub Grass風の
-        フラットな角丸セルを描画する
-
-        透過・グラデーション・影は使用しない
-        """
-
-        # マス同士の隙間
-        gap = HEATMAP_CELL_GAP
-
-        # セルサイズ
-        size = 1.0 - gap
-
-        # 中央寄せ
-        offset = gap / 2
-
         # -----------------------------------------
-        # セル
+        # 実データ最大値
         # -----------------------------------------
 
-        cell = FancyBboxPatch(
-            (x + offset, y + offset),
-            size,
-            size,
-            boxstyle=(
-                "round," "pad=0," f"rounding_size=" f"{size * HEATMAP_ROUND_RATIO}"
-            ),
-            facecolor=color,
-            # 通常時は枠線なし
-            edgecolor="none",
-            linewidth=0,
-            zorder=2,
+        raw_max_mark = max(
+            1,
+            int(self.mark_values.max()),
         )
 
-        self.ax.add_patch(cell)
-
-    # =====================================================
-    # Hover列の枠
-    # =====================================================
-
-    def draw_hover_outline(self, bin_index):
-        """
-        Hover中の時間ビンを
-        控えめな枠線で強調する
-        """
-
-        mark_count = int(self.mark_values[bin_index])
-
-        unique_count = int(self.unique_values[bin_index])
-
-        mark_ratio = mark_count / self.max_mark
-
-        unique_ratio = unique_count / self.max_unique
-
-        mark_height = math.ceil(mark_ratio * HEATMAP_GRID_ROWS)
-
-        unique_height = math.ceil(unique_ratio * HEATMAP_GRID_ROWS)
-
-        height = max(mark_height, unique_height)
-
-        if height <= 0:
-            return
-
-        gap = HEATMAP_CELL_GAP
-
-        size = 1.0 - gap
-
-        offset = gap / 2
-
-        # 各セルに薄い枠を追加
-        for row in range(height):
-
-            outline = FancyBboxPatch(
-                (bin_index + offset, row + offset),
-                size,
-                size,
-                boxstyle=(
-                    "round," "pad=0," f"rounding_size=" f"{size * HEATMAP_ROUND_RATIO}"
-                ),
-                facecolor="none",
-                edgecolor="#f0f6fc",
-                linewidth=1.1,
-                zorder=5,
-            )
-
-            self.ax.add_patch(outline)
-
-    # =====================================================
-    # 描画
-    # =====================================================
-
-    def draw(self):
-        """
-        現在の状態で
-        ヒートマップを再描画する
-        """
+        raw_max_unique = max(
+            1,
+            int(self.unique_values.max()),
+        )
 
         # -----------------------------------------
-        # 古い右Y軸削除
+        # Y軸に余白を追加
         # -----------------------------------------
+
+        self.max_mark = get_axis_max(raw_max_mark)
+
+        self.max_unique = get_axis_max(raw_max_unique)
+
+    # =====================================================
+    # 軸の初期化 / 更新
+    # =====================================================
+
+    def setup_axes(self):
+        """
+        軸・凡例・タイトルを設定する。
+
+        スクロールごとには作り直さず、
+        Bin変更時だけ更新する。
+        """
 
         if self.ax_right is not None:
 
@@ -449,126 +720,27 @@ class MarkUniqueHeatmap:
 
             self.ax_right = None
 
-        # -----------------------------------------
-        # Axesクリア
-        # -----------------------------------------
-
-        self.ax.clear()
-
-        self.ax.set_facecolor(BACKGROUND_COLOR)
+        self.ax.set_ylim(
+            0,
+            HEATMAP_GRID_ROWS,
+        )
 
         # -----------------------------------------
-        # 表示範囲
+        # 左Y軸 Mark
         # -----------------------------------------
 
-        start_bin = self.get_visible_start()
+        left_grid_ticks = np.linspace(
+            0,
+            HEATMAP_GRID_ROWS,
+            5,
+        )
 
-        end_bin = min(len(self.mark_values), start_bin + HEATMAP_VISIBLE_COLUMNS)
-
-        # -----------------------------------------
-        # GitHub Grass風背景セル
-        # -----------------------------------------
-
-        # 表示中の全マスを
-        # 暗い色で先に描画する
-        for bin_index in range(start_bin, end_bin):
-
-            for row in range(HEATMAP_GRID_ROWS):
-
-                self.draw_cell(x=bin_index, y=row, color=EMPTY_CELL_COLOR)
-
-        # -----------------------------------------
-        # データセル
-        # -----------------------------------------
-
-        for bin_index in range(start_bin, end_bin):
-
-            # Mark数
-            mark_count = int(self.mark_values[bin_index])
-
-            # Unique数
-            unique_count = int(self.unique_values[bin_index])
-
-            # -------------------------------------
-            # 正規化
-            # -------------------------------------
-
-            mark_ratio = mark_count / self.max_mark
-
-            unique_ratio = unique_count / self.max_unique
-
-            # -------------------------------------
-            # 高さ
-            # -------------------------------------
-
-            mark_height = math.ceil(mark_ratio * HEATMAP_GRID_ROWS)
-
-            unique_height = math.ceil(unique_ratio * HEATMAP_GRID_ROWS)
-
-            max_height = max(mark_height, unique_height)
-
-            # -------------------------------------
-            # セル
-            # -------------------------------------
-
-            for row in range(max_height):
-
-                # Mark領域
-                mark_active = row < mark_height
-
-                # Unique領域
-                unique_active = row < unique_height
-
-                # RYB色計算
-                color = create_data_color(
-                    mark_active=mark_active,
-                    unique_active=unique_active,
-                    mark_ratio=mark_ratio,
-                    unique_ratio=unique_ratio,
-                )
-
-                # ベタ塗り
-                self.draw_cell(x=bin_index, y=row, color=color)
-
-        # -----------------------------------------
-        # Hover強調
-        # -----------------------------------------
-
-        if self.hover_bin is not None and start_bin <= self.hover_bin < end_bin:
-
-            self.draw_hover_outline(self.hover_bin)
-
-        # -----------------------------------------
-        # X軸
-        # -----------------------------------------
-
-        self.ax.set_xlim(start_bin, max(start_bin + 1, end_bin))
-
-        visible_count = max(1, end_bin - start_bin)
-
-        # 約6個のラベル
-        tick_step = max(1, visible_count // 6)
-
-        x_ticks = list(range(start_bin, end_bin + 1, tick_step))
-
-        self.ax.xaxis.set_major_locator(FixedLocator(x_ticks))
-
-        self.ax.xaxis.set_major_formatter(FuncFormatter(self.format_x_axis))
-
-        # -----------------------------------------
-        # 左Y軸
-        # -----------------------------------------
-
-        self.ax.set_ylim(0, HEATMAP_GRID_ROWS)
-
-        y_ticks = np.linspace(0, HEATMAP_GRID_ROWS, 5)
-
-        self.ax.set_yticks(y_ticks)
+        self.ax.set_yticks(left_grid_ticks)
 
         self.ax.yaxis.set_major_formatter(FuncFormatter(self.format_mark_axis))
 
         # -----------------------------------------
-        # 右Y軸
+        # 右Y軸 Unique
         # -----------------------------------------
 
         def grid_to_unique(grid_value):
@@ -577,62 +749,95 @@ class MarkUniqueHeatmap:
 
         def unique_to_grid(unique_value):
 
-            if self.max_unique == 0:
+            if self.max_unique <= 0:
                 return 0
 
             return unique_value / self.max_unique * HEATMAP_GRID_ROWS
 
         self.ax_right = self.ax.secondary_yaxis(
-            "right", functions=(grid_to_unique, unique_to_grid)
+            "right",
+            functions=(
+                grid_to_unique,
+                unique_to_grid,
+            ),
         )
 
-        self.ax_right.set_yticks(np.linspace(0, self.max_unique, 5))
+        unique_ticks = np.linspace(
+            0,
+            self.max_unique,
+            5,
+        )
 
-        # -----------------------------------------
-        # 正方形維持
-        # -----------------------------------------
+        self.ax_right.set_yticks(unique_ticks)
 
-        self.ax.set_aspect("equal", adjustable="box")
+        self.ax_right.yaxis.set_major_formatter(
+            FuncFormatter(lambda value, position: str(int(round(value))))
+        )
 
         # -----------------------------------------
         # ラベル
         # -----------------------------------------
 
-        self.ax.set_xlabel("Stream time", color="#8b949e", labelpad=12)
+        self.ax.set_xlabel(
+            "配信時間",
+            color=(TEXT_SECONDARY_COLOR),
+            labelpad=12,
+        )
 
-        self.ax.set_ylabel("Mark count", color="#58a6ff", labelpad=10)
+        self.ax.set_ylabel(
+            "Mark数",
+            color=(MARK_AXIS_COLOR),
+            labelpad=10,
+        )
 
-        self.ax_right.set_ylabel("Unique count", color="#d29922", labelpad=10)
+        self.ax_right.set_ylabel(
+            "Unique数",
+            color=(UNIQUE_AXIS_COLOR),
+            labelpad=10,
+        )
 
         # -----------------------------------------
         # タイトル
         # -----------------------------------------
 
         self.ax.set_title(
-            (f"{self.stream['title']}\n" f"{self.bin_seconds} sec/bin"),
-            color="#f0f6fc",
+            (
+                f"{self.stream['title']}\n"
+                f"1区間 "
+                f"{self.bin_seconds} 秒   "
+                f"左: Mark / 右: Unique"
+            ),
+            color=(TEXT_PRIMARY_COLOR),
             fontsize=12,
             pad=14,
         )
 
         # -----------------------------------------
-        # Tick
+        # Tick色
         # -----------------------------------------
 
-        # X
-        self.ax.tick_params(axis="x", colors="#8b949e", length=0)
+        self.ax.tick_params(
+            axis="x",
+            colors=(TEXT_SECONDARY_COLOR),
+            length=0,
+        )
 
-        # Mark
-        self.ax.tick_params(axis="y", colors="#58a6ff", length=0)
+        self.ax.tick_params(
+            axis="y",
+            colors=(MARK_AXIS_COLOR),
+            length=0,
+        )
 
-        # Unique
-        self.ax_right.tick_params(axis="y", colors="#d29922", length=0)
+        self.ax_right.tick_params(
+            axis="y",
+            colors=(UNIQUE_AXIS_COLOR),
+            length=0,
+        )
 
         # -----------------------------------------
         # 枠線
         # -----------------------------------------
 
-        # 上下左右の枠を消す
         for spine in self.ax.spines.values():
 
             spine.set_visible(False)
@@ -641,17 +846,18 @@ class MarkUniqueHeatmap:
         # 凡例
         # -----------------------------------------
 
-        mark_color = create_data_color(True, False, 1.0, 0.0)
-
-        mixed_color = create_data_color(True, True, 1.0, 1.0)
-
-        unique_color = create_data_color(False, True, 0.0, 1.0)
-
         legend = self.ax.legend(
             handles=[
-                Patch(facecolor=mark_color, edgecolor="none", label="Mark"),
-                Patch(facecolor=mixed_color, edgecolor="none", label="Mark + Unique"),
-                Patch(facecolor=unique_color, edgecolor="none", label="Unique"),
+                Patch(
+                    facecolor=(MARK_BASE_COLOR),
+                    edgecolor="none",
+                    label=("Mark（左）"),
+                ),
+                Patch(
+                    facecolor=(UNIQUE_BASE_COLOR),
+                    edgecolor="none",
+                    label=("Unique（右）"),
+                ),
             ],
             loc="upper left",
             frameon=False,
@@ -660,46 +866,218 @@ class MarkUniqueHeatmap:
 
         for text in legend.get_texts():
 
-            text.set_color("#8b949e")
+            text.set_color(TEXT_SECONDARY_COLOR)
 
-        # -----------------------------------------
-        # Hover Tooltip
-        # -----------------------------------------
+    # =====================================================
+    # ヒートマップ画像再生成
+    # =====================================================
 
-        self.annotation = self.ax.annotate(
-            "",
-            xy=(0, 0),
-            xytext=(14, 14),
-            textcoords=("offset points"),
-            bbox={"boxstyle": "round,pad=0.6", "fc": "#161b22", "ec": "#30363d"},
-            color="#f0f6fc",
-            fontsize=9,
-            zorder=20,
+    def rebuild_image(self):
+        """
+        Mark左 / Unique右 の
+        RGBA画像を生成する。
+
+        スクロール時は画像を作り直さず、
+        xlimだけ移動する。
+        """
+
+        image = create_split_heatmap_image(
+            mark_values=(self.mark_values),
+            unique_values=(self.unique_values),
+            max_mark=(self.max_mark),
+            max_unique=(self.max_unique),
         )
 
-        self.annotation.set_visible(False)
+        total_bins = len(self.mark_values)
 
-        # -----------------------------------------
-        # 更新
-        # -----------------------------------------
+        if self.image_artist is None:
+
+            self.image_artist = self.ax.imshow(
+                image,
+                origin="lower",
+                interpolation=("nearest"),
+                aspect="auto",
+                extent=(
+                    0,
+                    total_bins,
+                    0,
+                    HEATMAP_GRID_ROWS,
+                ),
+                zorder=2,
+            )
+
+        else:
+
+            self.image_artist.set_data(image)
+
+            self.image_artist.set_extent(
+                (
+                    0,
+                    total_bins,
+                    0,
+                    HEATMAP_GRID_ROWS,
+                )
+            )
+
+        self.hover_patch.set_zorder(8)
+
+        self.annotation.set_zorder(20)
+
+    # =====================================================
+    # 表示開始位置
+    # =====================================================
+
+    def get_max_start(self):
+
+        total_bins = len(self.mark_values)
+
+        return max(
+            0.0,
+            total_bins - HEATMAP_VISIBLE_COLUMNS,
+        )
+
+    def get_visible_start(self):
+        """
+        Scroll Sliderから
+        表示開始位置を連続値で計算する。
+        """
+
+        max_start = self.get_max_start()
+
+        if max_start <= 0:
+            return 0.0
+
+        ratio = self.scroll_slider.val / 100.0
+
+        return max_start * ratio
+
+    # =====================================================
+    # X軸更新
+    # =====================================================
+
+    def update_x_axis(
+        self,
+        start_bin,
+        end_bin,
+    ):
+        """
+        現在見えている範囲に合わせて
+        X軸ラベルを更新する。
+        """
+
+        visible_count = max(
+            1.0,
+            end_bin - start_bin,
+        )
+
+        # 約6個のラベルを表示
+        tick_step = max(
+            1,
+            int(math.ceil(visible_count / 6)),
+        )
+
+        first_tick = math.ceil(start_bin / tick_step) * tick_step
+
+        last_tick = math.floor(end_bin / tick_step) * tick_step
+
+        if last_tick < first_tick:
+
+            x_ticks = [start_bin]
+
+        else:
+
+            x_ticks = list(
+                np.arange(
+                    first_tick,
+                    last_tick + tick_step * 0.5,
+                    tick_step,
+                )
+            )
+
+        self.ax.xaxis.set_major_locator(FixedLocator(x_ticks))
+
+        self.ax.xaxis.set_major_formatter(FuncFormatter(self.format_x_axis))
+
+    # =====================================================
+    # 表示範囲更新
+    # =====================================================
+
+    def update_view(self):
+        """
+        スクロール位置だけを更新する。
+
+        セルを作り直さないので、
+        描画負荷を抑えられる。
+        """
+
+        total_bins = len(self.mark_values)
+
+        if total_bins <= 0:
+            return
+
+        if total_bins <= HEATMAP_VISIBLE_COLUMNS:
+
+            start_bin = 0.0
+
+            end_bin = float(total_bins)
+
+        else:
+
+            start_bin = self.get_visible_start()
+
+            end_bin = min(
+                float(total_bins),
+                start_bin + HEATMAP_VISIBLE_COLUMNS,
+            )
+
+        if end_bin <= start_bin:
+
+            end_bin = start_bin + 1.0
+
+        self.ax.set_xlim(
+            start_bin,
+            end_bin,
+        )
+
+        self.update_x_axis(
+            start_bin,
+            end_bin,
+        )
+
+        if self.hover_bin is not None:
+
+            if not (start_bin <= self.hover_bin < end_bin):
+
+                self.clear_hover(draw=False)
 
         self.fig.canvas.draw_idle()
 
     # =====================================================
-    # X軸
+    # X軸フォーマット
     # =====================================================
 
-    def format_x_axis(self, value, position):
+    def format_x_axis(
+        self,
+        value,
+        position,
+    ):
 
-        seconds = int(value * self.bin_seconds)
+        seconds = max(
+            0,
+            int(round(value * self.bin_seconds)),
+        )
 
         return seconds_to_time(seconds)
 
     # =====================================================
-    # Mark軸
+    # Mark軸フォーマット
     # =====================================================
 
-    def format_mark_axis(self, value, position):
+    def format_mark_axis(
+        self,
+        value,
+        position,
+    ):
 
         count = value / HEATMAP_GRID_ROWS * self.max_mark
 
@@ -709,167 +1087,195 @@ class MarkUniqueHeatmap:
     # Bin変更
     # =====================================================
 
-    def on_bin_changed(self, value):
+    def on_bin_changed(
+        self,
+        value,
+    ):
 
-        # 秒数変更
         self.bin_seconds = int(value)
 
-        # データ再生成
         self.rebuild_data()
 
-        # Hover解除
-        self.hover_bin = None
+        self.clear_hover(draw=False)
 
-        # スクロールを先頭へ
-        self.scroll_slider.set_val(0)
+        self._updating_scroll_slider = True
 
-        self.draw()
+        self.scroll_slider.set_val(0.0)
+
+        self._updating_scroll_slider = False
+
+        self.setup_axes()
+
+        self.rebuild_image()
+
+        self.update_view()
 
     # =====================================================
-    # Scroll変更
+    # Scroll Slider変更
     # =====================================================
 
-    def on_scroll_changed(self, value):
+    def on_scroll_changed(
+        self,
+        value,
+    ):
 
-        # Hover解除
-        self.hover_bin = None
+        if self._updating_scroll_slider:
+            return
 
-        self.draw()
+        self.update_view()
 
     # =====================================================
     # マウスホイール横スクロール
     # =====================================================
 
-    def on_mouse_scroll(self, event):
+    def on_mouse_scroll(
+        self,
+        event,
+    ):
 
         if event.inaxes != self.ax:
             return
 
-        total_bins = len(self.mark_values)
+        max_start = self.get_max_start()
 
-        max_start = max(0, total_bins - HEATMAP_VISIBLE_COLUMNS)
-
-        if max_start == 0:
+        if max_start <= 0:
             return
 
         current_start = self.get_visible_start()
 
-        # 3マスずつ移動
-        move = 3
+        step = getattr(
+            event,
+            "step",
+            0.0,
+        )
 
-        if event.button == "up":
+        if step == 0:
 
-            new_start = max(0, current_start - move)
+            if event.button == "up":
+                step = 1.0
 
-        else:
+            elif event.button == "down":
+                step = -1.0
 
-            new_start = min(max_start, current_start + move)
+        new_start = current_start - step * HEATMAP_SCROLL_STEP
 
-        new_scroll = new_start / max_start * 100
+        new_start = float(
+            np.clip(
+                new_start,
+                0.0,
+                max_start,
+            )
+        )
+
+        new_scroll = new_start / max_start * 100.0
 
         self.scroll_slider.set_val(new_scroll)
+
+    # =====================================================
+    # Hover解除
+    # =====================================================
+
+    def clear_hover(
+        self,
+        draw=True,
+    ):
+
+        self.hover_bin = None
+
+        self.hover_patch.set_visible(False)
+
+        self.annotation.set_visible(False)
+
+        if draw:
+            self.fig.canvas.draw_idle()
 
     # =====================================================
     # Hover
     # =====================================================
 
-    def on_mouse_move(self, event):
+    def on_mouse_move(
+        self,
+        event,
+    ):
         """
-        マウス位置から
-        最寄りの時間マスへSnapする
+        マウス位置から時間ビンへSnapし、
+        Mark / UniqueをTooltip表示する。
         """
-
-        # -----------------------------------------
-        # グラフ外
-        # -----------------------------------------
 
         if event.inaxes != self.ax or event.xdata is None:
 
             if self.hover_bin is not None:
 
-                self.hover_bin = None
-
-                self.draw()
+                self.clear_hover()
 
             return
-
-        # -----------------------------------------
-        # 時間ビン
-        # -----------------------------------------
 
         bin_index = int(math.floor(event.xdata))
 
-        # 範囲外
         if bin_index < 0 or bin_index >= len(self.mark_values):
-            return
 
-        # -----------------------------------------
-        # 値
-        # -----------------------------------------
+            if self.hover_bin is not None:
+
+                self.clear_hover()
+
+            return
 
         mark_count = int(self.mark_values[bin_index])
 
         unique_count = int(self.unique_values[bin_index])
 
-        # -----------------------------------------
-        # データなし
-        # -----------------------------------------
-
         if mark_count == 0 and unique_count == 0:
 
             if self.hover_bin is not None:
 
-                self.hover_bin = None
-
-                self.draw()
+                self.clear_hover()
 
             return
 
-        # -----------------------------------------
-        # Hover対象が変わった場合だけ再描画
-        # -----------------------------------------
-
-        if self.hover_bin != bin_index:
-
-            self.hover_bin = bin_index
-
-            self.draw()
-
-        # -----------------------------------------
-        # 時間
-        # -----------------------------------------
-
         start_seconds = bin_index * self.bin_seconds
 
-        end_seconds = min(self.stream["duration"], start_seconds + self.bin_seconds)
-
-        # -----------------------------------------
-        # Tooltip
-        # -----------------------------------------
+        end_seconds = min(
+            self.stream["duration"],
+            start_seconds + self.bin_seconds,
+        )
 
         text = (
             f"{seconds_to_time(start_seconds)}"
             f" - "
             f"{seconds_to_time(end_seconds)}\n"
-            f"Mark      {mark_count}\n"
-            f"Unique    {unique_count}\n"
-            f"Candidates "
+            f"Mark       {mark_count}\n"
+            f"Unique     {unique_count}\n"
+            f"候補数      "
             f"{len(self.candidate_ids[bin_index])}"
         )
-
-        # -----------------------------------------
-        # Tooltip位置
-        # -----------------------------------------
 
         mark_ratio = mark_count / self.max_mark
 
         unique_ratio = unique_count / self.max_unique
 
-        height = max(mark_ratio, unique_ratio) * HEATMAP_GRID_ROWS
+        height = (
+            max(
+                mark_ratio,
+                unique_ratio,
+            )
+            * HEATMAP_GRID_ROWS
+        )
+
+        self.hover_bin = bin_index
+
+        self.hover_patch.set_x(bin_index)
+
+        self.hover_patch.set_visible(True)
 
         self.annotation.xy = (
             bin_index + 0.5,
-            min(HEATMAP_GRID_ROWS - 0.5, max(0.5, height)),
+            min(
+                HEATMAP_GRID_ROWS - 0.5,
+                max(
+                    0.5,
+                    height,
+                ),
+            ),
         )
 
         self.annotation.set_text(text)
@@ -892,7 +1298,9 @@ class MarkUniqueHeatmap:
 # =========================================================
 
 
-def plot_mark_unique_heatmap(live_id):
+def plot_mark_unique_heatmap(
+    live_id,
+):
 
     heatmap = MarkUniqueHeatmap(live_id)
 

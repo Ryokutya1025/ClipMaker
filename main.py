@@ -50,7 +50,7 @@ def main():
     save_analysis(comments, marks, clips)
 
     # グラフ表示
-    # plot_mark_unique_heatmap(comments[0]["live_id"])
+    plot_mark_unique_heatmap(comments[0]["live_id"])
 
 
 if __name__ == "__main__":

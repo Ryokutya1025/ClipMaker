@@ -78,14 +78,12 @@ def get_info(path):
 
                 # コメント本文を取得
                 comment = data.get("comment", "")
-
                 # コメント内のスタンプ・HTML風タグを削除
                 comment = TAG_PATTERN.sub("", comment).strip()
 
                 # タグ削除後に本文が空になったコメントを除外
                 if not comment:
                     continue
-
                 # -----------------------------------------
                 # 配信情報
                 # -----------------------------------------
